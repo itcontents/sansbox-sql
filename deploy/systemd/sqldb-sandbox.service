@@ -1,0 +1,41 @@
+[Unit]
+Description=sqldb-sandbox API (FastAPI / uvicorn)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=sandbox
+Group=sandbox
+SupplementaryGroups=docker
+# __WORKING_DIR__ is substituted by scripts/bootstrap.sh from the
+# .env variable SANDBOX_WORKING_DIR (default: /opt/sqldb-sandbox-setup).
+WorkingDirectory=__WORKING_DIR__
+EnvironmentFile=__WORKING_DIR__/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m uvicorn api.main:app \
+    --host 127.0.0.1 \
+    --port 8080 \
+    --workers 1 \
+    --proxy-headers \
+    --forwarded-allow-ips=* \
+    --log-level info
+Restart=on-failure
+RestartSec=3
+# Resource caps (H6): runaway mysqldump / OOM-kill shouldn't take the host.
+MemoryMax=2G
+CPUQuota=200%
+TasksMax=512
+LimitNOFILE=65536
+# Hardening.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/sandboxes /var/log/sandboxes
+# Lighter sandboxing of the service itself; container-level limits are on the
+# MySQL containers in templates/docker-compose.yml.j2.
+
+[Install]
+WantedBy=multi-user.target

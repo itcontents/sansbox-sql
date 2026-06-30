@@ -1,0 +1,22 @@
+# Rotate the per-session MySQL logs that survive past a sandbox nuke
+# (logs are intentionally persisted for forensics).
+/var/log/sandboxes/*/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    sharedscripts
+    create 0640 root sandbox
+}
+
+/var/log/nginx/sqldb-sandbox.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root root
+}

@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+.env
+
+# Test artefacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# State / runtime artefacts
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Local backups / scratch
+*.bak
+/tmp/

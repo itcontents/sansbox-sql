@@ -1,0 +1,16 @@
+[mysqld]
+ssl-ca = /etc/mysql/tls/ca.pem
+ssl-cert = /etc/mysql/tls/server-cert.pem
+ssl-key = /etc/mysql/tls/server-key.pem
+require-secure-transport = ON
+local-infile = 0
+performance-schema = ON
+default-authentication-plugin = caching_sha2_password
+skip-name-resolve
+log_error = /var/log/mysql/error.log
+slow_query_log = 1
+slow_query_log_file = /var/log/mysql/slow.log
+long_query_time = 2
+general_log = 0
+general_log_file = /var/log/mysql/general.log
+max_connections = 50
