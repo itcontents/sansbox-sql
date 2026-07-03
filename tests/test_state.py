@@ -230,11 +230,11 @@ def test_update_to_ready_ignored_when_status_already_changed(tmp_path: Path):
 def test_claim_stuck_picks_old_starting_and_error(tmp_path: Path):
     s = SessionStore(tmp_path / "state.db")
     try:
-        for sid, status, created in [
-            ("old_starting", "starting", 100),
-            ("old_error",    "error",    100),
-            ("new_starting", "starting", 9_999_999),  # still fresh
-            ("ready_old",    "ready",    100),         # not in starting/error
+        for sid, status, created, expires in [
+            ("old_starting", "starting", 100, 100),
+            ("old_error",    "error",    100, 100),
+            ("new_starting", "starting", 100, 10_000_999),  # still fresh
+            ("ready_old",    "ready",    100, 100),          # not in starting/error
         ]:
             s.create({
                 "id": sid, "ticket": "t", "date": "d",
@@ -242,7 +242,7 @@ def test_claim_stuck_picks_old_starting_and_error(tmp_path: Path):
                 "host": "h", "mysql_host": "1.2.3.4", "port": 1,
                 "container_name": "c",
                 "compose_path": "/tmp/x.yml", "tls_dir": "/tmp/t", "log_dir": "/tmp/l",
-                "created_at": created, "expires_at": created + 60, "max_extended_until": created + 200,
+                "created_at": created, "expires_at": expires, "max_extended_until": created + 200,
                 "status": status,
             })
         stuck = [r["id"] for r in s.claim_stuck(now=10_000, grace_seconds=60)]

@@ -150,8 +150,8 @@ class _FakeTunnel:
 
 
 def _build_mocked_service(settings: Settings, store: SessionStore) -> SessionService:
-    fake_dump = MagicMock()
-    fake_dump.return_value = MagicMock(sql_bytes=b"-- fake dump --")
+    fake_dump = MagicMock(return_value=b"-- fake dump --")
+    fake_clone = MagicMock()
 
     @contextmanager
     def fake_tunnel(**kw):
@@ -164,6 +164,7 @@ def _build_mocked_service(settings: Settings, store: SessionStore) -> SessionSer
         open_tunnel=fake_tunnel,
         dump_db=fake_dump,
         restore_db=MagicMock(),
+        clone_db=fake_clone,
         apply_grants=MagicMock(),
         wait_ready=MagicMock(),
         up_session=MagicMock(),
@@ -683,21 +684,21 @@ def test_create_instance_persists_placeholder_before_work(app_ctx):
     client, ctx = app_ctx
     seen_in_store: list[str] = []
 
-    real_dump = ctx.service.dump_db
+    real_clone = ctx.service.clone_db
 
     def boom(**kwargs):
-        # As soon as dump is called, the placeholder row MUST exist.
+        # As soon as clone starts, the placeholder row MUST exist.
         sids = [r["id"] for r in ctx.store.list_all()]
         seen_in_store.extend(sids)
         raise MySQLOpsError("mysqldump boom")
 
-    ctx.service.dump_db = boom
+    ctx.service.clone_db = boom
     try:
         client.post("/instance", json={"ticket": "t", "dbs": ["db_a"]}, headers=_auth_headers())
     finally:
-        ctx.service.dump_db = real_dump
+        ctx.service.clone_db = real_clone
 
-    assert seen_in_store, "no placeholder row was persisted before dump ran"
+    assert seen_in_store, "no placeholder row was persisted before clone ran"
     # And the row went to 'error' after failure.
     assert any(
         ctx.store.get(s)["status"] == "error" for s in seen_in_store if s

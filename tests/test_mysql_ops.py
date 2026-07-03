@@ -11,6 +11,7 @@ import pytest
 from api.mysql_ops import (
     MySQLOpsError,
     apply_grants,
+    clone_db,
     dump_db,
     restore_db,
     wait_ready,
@@ -128,7 +129,7 @@ def test_tunnel_local_port_is_open(monkeypatch, tmp_path: Path):
 def test_dump_db_calls_mysqldump_with_local_port(monkeypatch, tmp_path: Path):
     captured: dict = {}
 
-    class FakePopen:
+    class FakeRun:
         returncode = 0
         stdout = b"-- dump --"
         stderr = b""
@@ -137,7 +138,7 @@ def test_dump_db_calls_mysqldump_with_local_port(monkeypatch, tmp_path: Path):
         captured["cmd"] = cmd
         captured["input"] = kwargs.get("input")
         captured["capture"] = kwargs.get("capture_output")
-        return FakePopen()
+        return FakeRun()
 
     t = _make_tunnel(monkeypatch, tmp_path)
     try:
@@ -150,8 +151,7 @@ def test_dump_db_calls_mysqldump_with_local_port(monkeypatch, tmp_path: Path):
                 user="dumper",
                 password="pw",
             )
-        assert res.db == "db_a"
-        assert res.sql_bytes == b"-- dump --"
+        assert res == b"-- dump --"
         assert "--port=" + str(t.local_port) in captured["cmd"]
         assert "--host=127.0.0.1" in captured["cmd"]
         assert "mysqldump" in captured["cmd"][0]
@@ -160,14 +160,14 @@ def test_dump_db_calls_mysqldump_with_local_port(monkeypatch, tmp_path: Path):
 
 
 def test_dump_db_raises_on_failure(monkeypatch, tmp_path: Path):
-    class FakePopen:
+    class FakeRun:
         returncode = 1
         stdout = b""
         stderr = b"ERROR 1045"
 
     t = _make_tunnel(monkeypatch, tmp_path)
     try:
-        with patch("api.mysql_ops.subprocess.run", return_value=FakePopen()), patch(
+        with patch("api.mysql_ops.subprocess.run", return_value=FakeRun()), patch(
             "api.mysql_ops._resolve_binary", return_value="/usr/bin/mysqldump"
         ):
             with pytest.raises(MySQLOpsError):
@@ -204,6 +204,122 @@ def test_restore_db_pipes_sql(monkeypatch):
     assert captured[1]["cmd"][0] == "/usr/bin/mysql"
     assert captured[1]["input"] == b"CREATE TABLE x;"
     assert "--host=sandbox" in captured[1]["cmd"]
+
+
+def test_clone_db_streams_dump_directly_into_restore(monkeypatch, tmp_path: Path):
+    captured: list[dict] = []
+
+    class FakeStream:
+        def read(self):
+            return b""
+
+        def close(self):
+            return None
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            self.cmd = cmd
+            self.kwargs = kwargs
+            self.returncode = 0
+            self.stdout = FakeStream() if "mysqldump" in cmd[0] else None
+            self.stderr = FakeStream()
+
+        def communicate(self, timeout=None):
+            captured.append({"cmd": self.cmd, "kwargs": self.kwargs, "timeout": timeout})
+            return (b"", b"")
+
+        def wait(self, timeout=None):
+            captured.append({"cmd": self.cmd, "kwargs": self.kwargs, "timeout": timeout})
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    def fake_popen(cmd, **kwargs):
+        return FakePopen(cmd, **kwargs)
+
+    t = _make_tunnel(monkeypatch, tmp_path)
+    try:
+        with patch("api.mysql_ops.subprocess.Popen", side_effect=fake_popen), patch(
+            "api.mysql_ops._resolve_binary",
+            side_effect=lambda name: f"/usr/bin/{name}",
+        ), patch("api.mysql_ops._ensure_database") as ensure:
+            clone_db(
+                tunnel=t,
+                source_db="db_a",
+                source_user="dumper",
+                source_password="prodpw",
+                target_host="127.0.0.1",
+                target_port=33451,
+                target_user="root",
+                target_password="rootpw",
+                target_db="db_a",
+            )
+        ensure.assert_called_once()
+        assert any("mysqldump" in rec["cmd"][0] for rec in captured)
+        assert any("mysql" in rec["cmd"][0] for rec in captured)
+    finally:
+        t._cm.__exit__(None, None, None)  # type: ignore[attr-defined]
+
+
+def test_clone_db_passes_ssl_ca_to_restore_side(monkeypatch, tmp_path: Path):
+    captured: list[dict] = []
+
+    class FakeStream:
+        def read(self):
+            return b""
+
+        def close(self):
+            return None
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            self.cmd = cmd
+            self.kwargs = kwargs
+            self.returncode = 0
+            self.stdout = FakeStream() if "mysqldump" in cmd[0] else None
+            self.stderr = FakeStream()
+
+        def communicate(self, timeout=None):
+            captured.append({"cmd": self.cmd})
+            return (b"", b"")
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    t = _make_tunnel(monkeypatch, tmp_path)
+    try:
+        with patch("api.mysql_ops.subprocess.Popen", side_effect=lambda *a, **kw: FakePopen(*a, **kw)), patch(
+            "api.mysql_ops._resolve_binary",
+            side_effect=lambda name: f"/usr/bin/{name}",
+        ), patch("api.mysql_ops._ensure_database") as ensure:
+            clone_db(
+                tunnel=t,
+                source_db="db_a",
+                source_user="dumper",
+                source_password="prodpw",
+                target_host="127.0.0.1",
+                target_port=33451,
+                target_user="root",
+                target_password="rootpw",
+                target_db="db_a",
+                ssl_ca=tmp_path / "ca.pem",
+            )
+        # The dump-side mysql call (i.e. the *restore* binary) must carry
+        # --ssl-mode=REQUIRED --ssl-ca=<path>.
+        mysql_calls = [rec["cmd"] for rec in captured if "/usr/bin/mysql" == rec["cmd"][0]]
+        assert mysql_calls, "no mysql restore call captured"
+        joined = " ".join(mysql_calls[0])
+        assert "--ssl-mode=REQUIRED" in joined
+        assert "--ssl-ca=" + str(tmp_path / "ca.pem") in joined
+        # And _ensure_database got ssl_ca plumbed in as well.
+        _, kwargs = ensure.call_args
+        assert kwargs["ssl_ca"] == tmp_path / "ca.pem"
+    finally:
+        t._cm.__exit__(None, None, None)  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize(
@@ -322,7 +438,7 @@ def test_dump_db_passes_tables_as_positional_args(monkeypatch, tmp_path):
                 tables=["orders", "users"],
             )
         # tables come after the db name as positional args
-        assert res.sql_bytes == b"-- partial --"
+        assert res == b"-- partial --"
         idx_db = captured["cmd"].index("db_a")
         assert captured["cmd"][idx_db + 1] == "orders"
         assert captured["cmd"][idx_db + 2] == "users"

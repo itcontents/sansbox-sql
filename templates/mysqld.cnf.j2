@@ -5,7 +5,9 @@ ssl-key = /etc/mysql/tls/server-key.pem
 require-secure-transport = ON
 local-infile = 0
 performance-schema = ON
-default-authentication-plugin = caching_sha2_password
+# default-authentication-plugin is a CLI-only option in MySQL 8.x; the
+# server refuses it from mysqld.cnf with MY-000067. We start the container
+# with `--default-authentication-plugin=caching_sha2_password` instead.
 skip-name-resolve
 log_error = /var/log/mysql/error.log
 slow_query_log = 1

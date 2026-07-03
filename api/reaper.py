@@ -17,6 +17,10 @@ def _teardown(call: Callable[[Path, ...], None], compose_path: Path, **kwargs):
     """Run `call(compose_path, **kwargs)`, handling the legacy signature
     that doesn't accept `remove_volumes`. Returns whether teardown succeeded.
     """
+    # Orphan cleanup: if the compose file is gone (create crashed before
+    # writing it, or it was removed on teardown), there is nothing to do.
+    if not compose_path.exists():
+        return True
     try:
         call(compose_path, **kwargs)
         return True

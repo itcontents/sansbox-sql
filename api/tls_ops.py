@@ -178,6 +178,10 @@ def generate_session_tls(
 
     sans_dns = [container_hostname]
     sans_ip = [mysql_host_ip] if mysql_host_ip else []
+    # 127.0.0.1 SAN so the API-host mysql client (which talks to the
+    # published host port over loopback) can verify the cert hostname when
+    # using --ssl-mode=REQUIRED --ssl-ca=<per-session ca.pem>.
+    sans_ip.append("127.0.0.1")
     server_cert, server_key = _sign_leaf(
         ca_cert=ca_cert,
         ca_key=ca_key,

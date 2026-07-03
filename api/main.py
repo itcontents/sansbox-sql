@@ -45,6 +45,7 @@ def _build_service(settings: Settings, store: SessionStore) -> SessionService:
         open_tunnel=ssh_tunnel.open_tunnel,
         dump_db=mysql_ops.dump_db,
         restore_db=mysql_ops.restore_db,
+        clone_db=mysql_ops.clone_db,
         apply_grants=mysql_ops.apply_grants,
         wait_ready=mysql_ops.wait_ready,
         up_session=docker_ops.up_session,

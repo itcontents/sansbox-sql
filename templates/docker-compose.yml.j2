@@ -11,7 +11,6 @@ services:
       - --require-secure-transport=ON
       - --local-infile=0
       - --performance-schema=ON
-      - --default-authentication-plugin=caching_sha2_password
     environment:
       MYSQL_ROOT_PASSWORD: "{{ root_password }}"
       MYSQL_ROOT_HOST: "%"
@@ -32,11 +31,11 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - mysqladmin ping -h 127.0.0.1 -uroot -p"$$MYSQL_ROOT_PASSWORD" --ssl-mode=DISABLED
+        - mysqladmin ping -h 127.0.0.1 -uroot -p"$$MYSQL_ROOT_PASSWORD" --ssl-mode=REQUIRED --ssl-ca=/etc/mysql/tls/ca.pem
       interval: 5s
       timeout: 5s
-      retries: 30
-      start_period: 30s
+      retries: 60
+      start_period: 180s
 
 volumes:
   sandbox-{{ sid }}-data:

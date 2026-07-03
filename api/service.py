@@ -67,6 +67,7 @@ def _classify_failure(exc: BaseException) -> tuple[str, str]:
 
 DumpFn = Callable[..., object]
 RestoreFn = Callable[..., None]
+CloneFn = Callable[..., None]
 ApplyGrantsFn = Callable[..., None]
 WaitReadyFn = Callable[..., None]
 UpFn = Callable[[Path], None]
@@ -92,6 +93,7 @@ class SessionService:
     open_tunnel: OpenTunnelFn
     dump_db: DumpFn
     restore_db: RestoreFn
+    clone_db: CloneFn
     apply_grants: ApplyGrantsFn
     wait_ready: WaitReadyFn
     up_session: UpFn
@@ -139,7 +141,10 @@ class SessionService:
                 "tls_dir": str(paths.tls_dir),
                 "log_dir": str(paths.log_dir),
                 "created_at": now,
-                "expires_at": now + 60,  # short grace
+                # Placeholder row while create is in progress. The reaper uses
+                # `expires_at` as the stuck-create deadline, so give slow dumps
+                # enough room before treating the session as orphaned.
+                "expires_at": now + 3600,
                 "max_extended_until": now,
                 "ttl_extended": 0,
                 "status": STATUS_STARTING,
@@ -240,6 +245,11 @@ class SessionService:
             mysql_host_ip=self.settings.sandbox_mysql_host,
         )
 
+        # Per-session CA cert used by every client call into this sandbox.
+        # The server is configured with require-secure-transport=ON, so
+        # passing --ssl-mode=REQUIRED here is mandatory.
+        tls_ca_path = paths.tls_dir / "ca.pem"
+
         self.render_compose(
             paths=paths,
             sid=sid,
@@ -251,6 +261,16 @@ class SessionService:
         )
         self.render_mysqld_cnf(paths=paths)
 
+        self.up_session(paths.compose_path)
+        self.wait_healthy(container_name, timeout_seconds=600)
+        self.wait_ready(
+            host="127.0.0.1",
+            port=host_port,
+            user="root",
+            password=root_password,
+            timeout_seconds=60,
+            ssl_ca=tls_ca_path,
+        )
         with self.open_tunnel(
             ssh_host=self.settings.prod_ssh_host,
             ssh_port=self.settings.prod_ssh_port,
@@ -260,42 +280,28 @@ class SessionService:
             remote_port=self.settings.prod_mysql_port,
             bind_host=self.settings.sandbox_tunnel_bind_host,
         ) as tunnel:
-            dumps = {
-                spec.name: self.dump_db(
+            for spec in dbs:
+                self.clone_db(
                     tunnel=tunnel,
-                    db=spec.name,
-                    user=self.settings.prod_mysql_user,
-                    password=self.settings.prod_mysql_password,
+                    source_db=spec.name,
+                    source_user=self.settings.prod_mysql_user,
+                    source_password=self.settings.prod_mysql_password,
+                    target_host="127.0.0.1",
+                    target_port=host_port,
+                    target_user="root",
+                    target_password=root_password,
+                    target_db=spec.name,
                     host=tunnel.local_host,
                     tables=spec.table_list or (),
+                    ssl_ca=tls_ca_path,
                 )
-                for spec in dbs
-            }
-
-        self.up_session(paths.compose_path)
-        self.wait_healthy(container_name, timeout_seconds=180)
-        self.wait_ready(
-            host="127.0.0.1",
-            port=host_port,
-            user="root",
-            password=root_password,
-            timeout_seconds=60,
-        )
-        for spec in dbs:
-            self.restore_db(
-                host="127.0.0.1",
-                port=host_port,
-                user="root",
-                password=root_password,
-                db=spec.name,
-                sql_bytes=dumps[spec.name].sql_bytes,
-            )
         self.apply_grants(
             host="127.0.0.1",
             port=host_port,
             user="root",
             password=root_password,
             sql_statements=[self.render_grant_sql(grants=grants)],
+            ssl_ca=tls_ca_path,
         )
 
         # Re-render the compose file with the public bind host — clean re-render
@@ -312,7 +318,7 @@ class SessionService:
         )
         self.down_session(paths.compose_path, remove_volumes=False)
         self.up_session(paths.compose_path)
-        self.wait_healthy(container_name, timeout_seconds=120)
+        self.wait_healthy(container_name, timeout_seconds=300)
 
         expires_at = created_at + self.settings.sandbox_ttl_default_seconds
         max_extended_until = created_at + self.settings.sandbox_ttl_max_seconds

@@ -26,10 +26,12 @@ fi
 
 log "creating directories"
 mkdir -p "${COMPOSE_DIR}" "${TLS_DIR}" "${SANDBOX_LOG_DIR}"
+chown -R root:"${SANDBOX_USER}" "${COMPOSE_DIR}" "${TLS_DIR}"
+chmod 0770 "${COMPOSE_DIR}" "${TLS_DIR}"
 chown -R root:"${SANDBOX_USER}" "${SANDBOX_STATE_DIR}"
-chmod 0750 "${SANDBOX_STATE_DIR}"
+chmod 0770 "${SANDBOX_STATE_DIR}"
 chown -R root:"${SANDBOX_USER}" "${SANDBOX_LOG_DIR}"
-chmod 0750 "${SANDBOX_LOG_DIR}"
+chmod 0770 "${SANDBOX_LOG_DIR}"
 
 log "ensuring '${SANDBOX_USER}' is in 'docker' group"
 if ! groups "${SANDBOX_USER}" | tr ' ' '\n' | grep -qx docker; then
@@ -89,7 +91,7 @@ chmod 0640 "${ENV_FILE}"
 chown root:"${SANDBOX_USER}" "${ENV_FILE}"
 
 log "installing python deps"
-${PYTHON_BIN} -m pip install --break-system-packages -q -r "${REPO_ROOT}/requirements.txt" \
+${PYTHON_BIN} -m pip install --break-system-packages --ignore-installed -q -r "${REPO_ROOT}/requirements.txt" \
   || die "pip install failed; consider a virtualenv instead of --break-system-packages"
 
 log "running test suite"

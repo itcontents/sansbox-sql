@@ -124,6 +124,7 @@ def open_tunnel(
     The tunnel is torn down when the context manager exits.
     """
     client = paramiko.SSHClient()
+    client.load_system_host_keys()
     client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
     pkey = _load_private_key(ssh_key)

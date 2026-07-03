@@ -242,16 +242,18 @@ class SessionStore:
         inserted early as a placeholder) or the create raised and an error
         path left a row in `error`. Either way the container must be nuked.
 
+        `grace_seconds` is kept for backward compatibility with older callers,
+        but the row's `expires_at` is the authoritative stuck-create deadline.
+
         Returns the claimed records; their status is left untouched here so
         the caller (reaper) can attempt `down_session`, then mark `nuked`
         once it actually tore down.
         """
-        cutoff = now - grace_seconds
         with self._tx() as conn:
             rows = conn.execute(
                 "SELECT * FROM sessions "
-                "WHERE status IN (?, ?) AND created_at < ?",
-                (STATUS_STARTING, STATUS_ERROR, cutoff),
+                "WHERE status IN (?, ?) AND expires_at < ?",
+                (STATUS_STARTING, STATUS_ERROR, now),
             ).fetchall()
             return [dict(r) for r in rows] if rows else []
 

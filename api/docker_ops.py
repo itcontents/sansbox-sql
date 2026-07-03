@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import secrets
+import socket
 import string
 import subprocess
 from dataclasses import dataclass
@@ -135,11 +136,19 @@ def down_session(compose_path: Path, *, remove_volumes: bool = True, timeout: in
 
 
 def wait_healthy(container_name: str, timeout_seconds: int = 120) -> None:
-    """Block until docker reports the container as healthy."""
+    """Block until the container is ready for connections.
+
+    Tries the docker `healthy` status if available, then falls back to a
+    TCP connect against the published `127.0.0.1:$host_port`. The TCP probe
+    is the authoritative signal because docker healthchecks are not always
+    reliable in deployments where the API user has restricted socket access.
+    """
+    import socket
     import time
 
     deadline = time.monotonic() + timeout_seconds
-    last_status = ""
+    last_status = "unknown"
+    last_tcp = "unknown"
     while time.monotonic() < deadline:
         proc = subprocess.run(
             [
@@ -151,16 +160,71 @@ def wait_healthy(container_name: str, timeout_seconds: int = 120) -> None:
             ],
             check=False,
             capture_output=True,
-            timeout=10,
+            timeout=5,
         )
         if proc.returncode == 0:
             last_status = proc.stdout.decode().strip()
             if last_status == "healthy":
-                return
+                # Confirm TCP is actually accepting on the published port.
+                port = _read_published_port(container_name)
+                if port and _tcp_open("127.0.0.1", port, timeout=2):
+                    return
+                last_status = last_status or "healthy-but-no-port"
+
+        # Fallback: read the published host port and probe TCP directly.
+        port = _read_published_port(container_name)
+        if port and _tcp_open("127.0.0.1", port, timeout=2):
+            return
+        last_tcp = f"port={port}"
+
         time.sleep(2)
+
     raise DockerOpsError(
-        f"container {container_name} did not become healthy in {timeout_seconds}s; last status: {last_status}"
+        f"container {container_name} did not become ready in {timeout_seconds}s; "
+        f"last docker status: {last_status}; tcp probe: {last_tcp}"
     )
+
+
+def _tcp_open(host: str, port: int, *, timeout: float = 1.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (OSError, socket.error):
+        return False
+
+
+def _read_published_port(container_name: str) -> int | None:
+    """Return the host-side port bound to the container's 3306/tcp, if any.
+
+    Uses the JSON inspect format and parses locally because Go templates
+    misbehave when iterating nested port bindings.
+    """
+    proc = subprocess.run(
+        ["docker", "inspect", container_name],
+        check=False,
+        capture_output=True,
+        timeout=5,
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        import json
+        data = json.loads(proc.stdout)
+        bindings = data[0].get("NetworkSettings", {}).get("Ports", {}).get("3306/tcp")
+        if bindings:
+            host_port = bindings[0].get("HostPort")
+            if host_port and str(host_port).isdigit():
+                return int(host_port)
+        host_cfg = (
+            data[0].get("HostConfig", {}).get("PortBindings", {}).get("3306/tcp")
+        )
+        if host_cfg:
+            host_port = host_cfg[0].get("HostPort")
+            if host_port and str(host_port).isdigit():
+                return int(host_port)
+    except Exception:
+        return None
+    return None
 
 
 def replace_port_in_compose(compose_path: Path, new_bind_host: str, new_host_port: int) -> None:
