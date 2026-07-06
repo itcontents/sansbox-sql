@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import os
 import socket
-import threading
+import subprocess
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
-
-import paramiko
 
 
 class TunnelError(Exception):
@@ -16,92 +16,66 @@ class TunnelError(Exception):
 
 @dataclass
 class Tunnel:
+    """A local TCP forward to (remote_host:remote_port) over an SSH `-L` subprocess.
+
+    The SSH process is the source of truth — when it dies, the forward is gone.
+    We do not try to introspect or restart it.
+    """
+
     local_port: int
     local_host: str
-    _server_sock: socket.socket
-    _client: paramiko.SSHClient
-    _stop_event: threading.Event
-    _serve_thread: threading.Thread
+    _proc: subprocess.Popen
 
     def close(self) -> None:
-        self._stop_event.set()
-        try:
-            self._server_sock.close()
-        except OSError:
-            pass
-        try:
-            self._client.close()
-        except Exception:
-            pass
-        self._serve_thread.join(timeout=2)
-
-
-def _pump(src, dst) -> None:
-    try:
-        while True:
-            data = src.recv(8192)
-            if not data:
-                break
-            dst.sendall(data)
-    except Exception:
-        pass
-    finally:
-        for s in (src, dst):
+        proc = self._proc
+        if proc.poll() is None:
             try:
-                s.close()
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2)
             except Exception:
                 pass
 
 
-def _serve_connections(
-    server_sock: socket.socket,
-    client: paramiko.SSHClient,
-    remote_host: str,
-    remote_port: int,
-    stop_event: threading.Event,
-) -> None:
-    server_sock.settimeout(0.5)
-    while not stop_event.is_set():
-        try:
-            conn, _ = server_sock.accept()
-        except socket.timeout:
-            continue
-        except OSError:
-            break
-        try:
-            transport = client.get_transport()
-            if transport is None:
-                conn.close()
-                continue
-            channel = transport.open_channel(
-                "direct-tcpip",
-                (remote_host, remote_port),
-                conn.getpeername(),
-            )
-        except Exception:
+def _wait_listening(host: str, port: int, *, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.3)
             try:
-                conn.close()
+                s.connect((host, port))
+                return True
             except OSError:
-                pass
-            continue
-        threading.Thread(target=_pump, args=(conn, channel), daemon=True).start()
-        threading.Thread(target=_pump, args=(channel, conn), daemon=True).start()
+                time.sleep(0.1)
+    return False
 
 
-def _load_private_key(path: Path) -> paramiko.PKey:
-    path = Path(path)
-    for loader in (
-        paramiko.Ed25519Key.from_private_key_file,
-        paramiko.RSAKey.from_private_key_file,
-        paramiko.ECDSAKey.from_private_key_file,
-    ):
-        try:
-            return loader(str(path))
-        except paramiko.PasswordRequiredException:
-            raise
-        except Exception:
-            continue
-    raise TunnelError(f"could not load SSH key: {path}")
+def _pick_local_port() -> int:
+    """Bind an ephemeral port on 127.0.0.1 to discover a free number, then release.
+    Using port=0 lets the kernel pick. We close immediately; the tunnel will
+    race to re-bind the same number. Acceptable for our low-concurrency use.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _known_hosts_file(ssh_user: str) -> Path:
+    """Use the calling user's known_hosts (the API runs as `sandbox`).
+    Falls back to /dev/null which forces strict checking to fail loudly.
+    """
+    sudo_user = os.environ.get("SUDO_USER") or os.environ.get("USER") or ssh_user
+    candidate = Path("/home") / sudo_user / ".ssh" / "known_hosts"
+    if candidate.exists():
+        return candidate
+    # /home/lytadmin/.ssh/known_hosts is the alternative when running as lytadmin.
+    fallback = Path("/home/lytadmin/.ssh/known_hosts")
+    if fallback.exists():
+        return fallback
+    return Path("/dev/null")
 
 
 @contextmanager
@@ -115,57 +89,82 @@ def open_tunnel(
     remote_port: int,
     bind_host: str = "127.0.0.1",
 ) -> Iterator[Tunnel]:
-    """Open a local <bind_host>:<random> forward to <remote_host>:<remote_port> over SSH.
+    """Open a local <bind_host>:<random> forward to <remote_host>:<remote_port>
+    by spawning `ssh -N -L`. The forward stays up until the context exits.
 
-    `bind_host` selects which local IP the SSH local-forward listener binds
-    to (defaults to 127.0.0.1). `mysqldump` is invoked with `--host=<bind_host>`
-    so it can reach the listener.
-
-    The tunnel is torn down when the context manager exits.
+    Replaces the previous paramiko `direct-tcpip` implementation, which wedged
+    intermittently (the channel accepted connections but stopped forwarding
+    bytes after the first idle period, with no exception or close event).
+    OpenSSH's `-L` forward is well-tested and handles keepalives + half-close
+    detection correctly.
     """
-    client = paramiko.SSHClient()
-    client.load_system_host_keys()
-    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    ssh_key = Path(ssh_key)
+    if not ssh_key.exists():
+        raise TunnelError(f"ssh key not found: {ssh_key}")
 
-    pkey = _load_private_key(ssh_key)
+    local_port = _pick_local_port()
+    known_hosts = _known_hosts_file(ssh_user)
+
+    cmd = [
+        "ssh",
+        "-N",
+        "-T",
+        "-x",
+        "-a",
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", f"UserKnownHostsFile={known_hosts}",
+        "-o", "ExitOnForwardFailure=yes",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=3",
+        "-o", "TCPKeepAlive=yes",
+        "-i", str(ssh_key),
+        "-p", str(ssh_port),
+        "-L", f"{bind_host}:{local_port}:{remote_host}:{remote_port}",
+        f"{ssh_user}@{ssh_host}",
+    ]
+
+    stderr_log = Path("/var/log/sandboxes") / "ssh-tunnel.err.log"
+    stderr_log.parent.mkdir(parents=True, exist_ok=True)
+    log_fp = open(stderr_log, "ab", buffering=0)
+
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=log_fp,
+        start_new_session=True,
+    )
 
     try:
-        client.connect(
-            hostname=ssh_host,
-            port=ssh_port,
-            username=ssh_user,
-            pkey=pkey,
-            allow_agent=False,
-            look_for_keys=False,
-            timeout=15,
-        )
-    except Exception as exc:
-        raise TunnelError(f"ssh connect failed: {exc}") from exc
+        if not _wait_listening(bind_host, local_port, timeout=10.0):
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            raise TunnelError(
+                f"ssh -L forward did not become ready within 10s "
+                f"(host={ssh_host}:{ssh_port} user={ssh_user} "
+                f"forward={bind_host}:{local_port}->{remote_host}:{remote_port}); "
+                f"see {stderr_log}"
+            )
 
-    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_sock.bind((bind_host, 0))
-    server_sock.listen(8)
-    local_addr = server_sock.getsockname()
-    local_host, local_port = local_addr[0], local_addr[1]
+        # If ssh died between the listen check and yield, propagate that.
+        if proc.poll() is not None:
+            raise TunnelError(
+                f"ssh -L exited prematurely (rc={proc.returncode}); see {stderr_log}"
+            )
 
-    stop_event = threading.Event()
-    serve_thread = threading.Thread(
-        target=_serve_connections,
-        args=(server_sock, client, remote_host, remote_port, stop_event),
-        daemon=True,
-    )
-    serve_thread.start()
-
-    tunnel = Tunnel(
-        local_port=local_port,
-        local_host=local_host,
-        _server_sock=server_sock,
-        _client=client,
-        _stop_event=stop_event,
-        _serve_thread=serve_thread,
-    )
-    try:
-        yield tunnel
-    finally:
-        tunnel.close()
+        tunnel = Tunnel(local_port=local_port, local_host=bind_host, _proc=proc)
+        try:
+            yield tunnel
+        finally:
+            tunnel.close()
+            log_fp.close()
+    except Exception:
+        try:
+            log_fp.close()
+        except Exception:
+            pass
+        raise
