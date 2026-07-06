@@ -13,6 +13,11 @@ log_error = /var/log/mysql/error.log
 slow_query_log = 1
 slow_query_log_file = /var/log/mysql/slow.log
 long_query_time = 2
-general_log = 0
+# Full statement audit for the sandbox: every Connect/Query/Quit lands in
+# general.log, which is bind-mounted to /var/log/sandboxes/<ticket>-<date>/<sid>/
+# and preserved after nuke + logrotate. Disk use at typical interactive load
+# is small; per-query fsync cost is acceptable for a per-DB-scoped dev session.
+general_log = 1
 general_log_file = /var/log/mysql/general.log
+log_output = FILE
 max_connections = 50

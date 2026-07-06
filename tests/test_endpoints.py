@@ -167,6 +167,7 @@ def _build_mocked_service(settings: Settings, store: SessionStore) -> SessionSer
         clone_db=fake_clone,
         apply_grants=MagicMock(),
         wait_ready=MagicMock(),
+        set_general_log=MagicMock(),
         up_session=MagicMock(),
         down_session=MagicMock(),
         replace_port_in_compose=MagicMock(),

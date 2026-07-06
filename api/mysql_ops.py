@@ -344,6 +344,43 @@ def apply_grants(
         )
 
 
+def set_general_log(
+    enabled: bool,
+    *,
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    ssl_ca: Path | None = None,
+) -> None:
+    """Flip `GLOBAL general_log` on/off without restarting MariaDB.
+
+    Used by the service flow to suppress the dump/restore window from the
+    per-session audit log; general_log is on at startup (from mysqld.cnf),
+    so flipping it off here keeps the dev's queries captured but excludes
+    the noisy mysqldump INSERTs during the clone.
+    """
+    mysql = _resolve_binary("mysql")
+    val = "1" if enabled else "0"
+    cmd = [
+        mysql,
+        f"--host={host}",
+        f"--port={port}",
+        f"--user={user}",
+    ]
+    if ssl_ca is not None:
+        cmd.extend(["--ssl-mode=REQUIRED", f"--ssl-ca={ssl_ca}"])
+    cmd.extend(["-e", f"SET GLOBAL general_log = {val}"])
+    proc = subprocess.run(
+        cmd, check=False, capture_output=True, timeout=30, env=_mysql_env(password),
+    )
+    if proc.returncode != 0:
+        raise MySQLOpsError(
+            f"set general_log={val} failed (rc={proc.returncode}): "
+            f"{proc.stderr.decode(errors='replace')[:500]}"
+        )
+
+
 def wait_ready(
     *,
     host: str,

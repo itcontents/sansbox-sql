@@ -48,6 +48,7 @@ def _build_service(settings: Settings, store: SessionStore) -> SessionService:
         clone_db=mysql_ops.clone_db,
         apply_grants=mysql_ops.apply_grants,
         wait_ready=mysql_ops.wait_ready,
+        set_general_log=mysql_ops.set_general_log,
         up_session=docker_ops.up_session,
         down_session=docker_ops.down_session,
         replace_port_in_compose=docker_ops.replace_port_in_compose,

@@ -70,6 +70,7 @@ RestoreFn = Callable[..., None]
 CloneFn = Callable[..., None]
 ApplyGrantsFn = Callable[..., None]
 WaitReadyFn = Callable[..., None]
+SetGeneralLogFn = Callable[..., None]
 UpFn = Callable[[Path], None]
 DownFn = Callable[[Path], None]
 ReplacePortFn = Callable[[Path, str, int], None]
@@ -96,6 +97,7 @@ class SessionService:
     clone_db: CloneFn
     apply_grants: ApplyGrantsFn
     wait_ready: WaitReadyFn
+    set_general_log: SetGeneralLogFn
     up_session: UpFn
     down_session: DownFn
     replace_port_in_compose: ReplacePortFn
@@ -271,6 +273,17 @@ class SessionService:
             timeout_seconds=60,
             ssl_ca=tls_ca_path,
         )
+        try:
+            self.set_general_log(
+                False,
+                host="127.0.0.1",
+                port=host_port,
+                user="root",
+                password=root_password,
+                ssl_ca=tls_ca_path,
+            )
+        except Exception:
+            log.exception("set_general_log(False) failed; audit log will include dump")
         with self.open_tunnel(
             ssh_host=self.settings.prod_ssh_host,
             ssh_port=self.settings.prod_ssh_port,
@@ -295,6 +308,17 @@ class SessionService:
                     tables=spec.table_list or (),
                     ssl_ca=tls_ca_path,
                 )
+        try:
+            self.set_general_log(
+                True,
+                host="127.0.0.1",
+                port=host_port,
+                user="root",
+                password=root_password,
+                ssl_ca=tls_ca_path,
+            )
+        except Exception:
+            log.exception("set_general_log(True) failed; dev queries may not be audited")
         self.apply_grants(
             host="127.0.0.1",
             port=host_port,
